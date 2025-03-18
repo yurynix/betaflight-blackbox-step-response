@@ -2,14 +2,48 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import savgol_filter
+import os
+import subprocess
+import glob
+from pathlib import Path
 
-# Read the CSV file
-df = pd.read_csv('log.01.csv')
+def convert_bbl_to_csv(bbl_file):
+    """Convert BBL file to CSV using blackbox_decode"""
+    csv_file = str(Path(bbl_file).with_suffix('.csv'))
+    subprocess.run(['./blackbox_decode', '--stdout', bbl_file], 
+                  stdout=open(csv_file, 'w'), 
+                  stderr=subprocess.PIPE)
+    return csv_file
 
-# Calculate actual log rate from time column
-time_us = df[' time (us)'].values
-log_rate = 1e6 / np.median(np.diff(time_us))  # Calculate rate in Hz
-print(f"Log rate: {log_rate:.1f} Hz")
+def process_log_file(csv_file):
+    """Process a single log file and return step responses"""
+    print(f"\nProcessing file: {csv_file}")
+    
+    # Read the CSV file
+    df = pd.read_csv(csv_file)
+    
+    # Calculate actual log rate from time column
+    time_us = df[' time (us)'].values
+    log_rate = 1e6 / np.median(np.diff(time_us))
+    print(f"Log rate: {log_rate:.1f} Hz")
+    
+    # Process each axis
+    responses = {}
+    for axis, (cmd_col, gyro_col) in enumerate([
+        (' rcCommand[0]', ' gyroADC[0]'),
+        (' rcCommand[1]', ' gyroADC[1]'),
+        (' rcCommand[2]', ' gyroADC[2]')
+    ]):
+        t, metrics, resp = calculate_step_response(
+            df[cmd_col].values, 
+            df[gyro_col].values, 
+            log_rate,
+            axis_name=f"Axis {axis}"
+        )
+        if t is not None:
+            responses[axis] = (t, metrics, resp)
+    
+    return responses
 
 def calculate_step_response(setpoint, gyro, log_rate, smooth_factor=2, axis_name="", y_correction=True):
     print(f"\nProcessing {axis_name}...")
@@ -108,7 +142,7 @@ def calculate_step_response(setpoint, gyro, log_rate, smooth_factor=2, axis_name
     print(f"Found {len(valid_responses)} valid step responses")
     
     if not valid_responses:
-        return None, None, None, None, None
+        return None, None, None
         
     # Average all valid responses
     avg_response = np.mean(valid_responses, axis=0)
@@ -148,47 +182,58 @@ fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 plt.subplots_adjust(hspace=0.3)
 
 # Common axis settings
-def setup_axis(ax, title, metrics=None):
+def setup_axis(ax, title):
     ax.grid(True, which='both', alpha=0.2)
     ax.set_ylabel(title)
     ax.set_ylim(-0.2, 1.5)
     ax.set_xlim(0, 500)
     ax.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
     ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+
+# Setup axes
+setup_axis(ax1, 'Roll')
+setup_axis(ax2, 'Pitch')
+setup_axis(ax3, 'Yaw')
+ax3.set_xlabel('Time (ms)')
+
+# Color cycle for different logs
+colors = plt.cm.tab10(np.linspace(0, 1, 10))
+
+# Process all BBL files in logs directory
+bbl_files = glob.glob('logs/*.bbl')
+for i, bbl_file in enumerate(bbl_files):
+    log_name = Path(bbl_file).stem
+    color = colors[i % len(colors)]
     
-    if metrics is not None:
-        # Rise time marker
-        rise_time = metrics['rise_time']
-        ax.axvline(x=rise_time, color='green', linestyle='--', alpha=0.7)
-        ax.text(rise_time + 5, 1.3, f'Rise: {rise_time:.1f}ms', rotation=0, color='green')
-        
-        # Settling time marker
-        settling_time = metrics['settling_time']
-        ax.axvline(x=settling_time, color='blue', linestyle='--', alpha=0.7)
-        ax.text(settling_time + 5, 1.1, f'Settling: {settling_time:.1f}ms', rotation=0, color='blue')
-        
-        # Overshoot text - centered
-        overshoot = metrics['overshoot']
-        ax.text(250, 1.3, f'Overshoot: {overshoot:.1f}%', color='red', 
-                horizontalalignment='center', verticalalignment='center')
+    # Convert BBL to CSV
+    print(f"\nConverting {bbl_file} to CSV...")
+    csv_file = convert_bbl_to_csv(bbl_file)
+    
+    # Process the log file
+    responses = process_log_file(csv_file)
+    
+    # Plot responses for each axis
+    axes = [ax1, ax2, ax3]
+    axis_names = ['Roll', 'Pitch', 'Yaw']
+    
+    for axis, ax in enumerate(axes):
+        if axis in responses:
+            t, metrics, resp = responses[axis]
+            ax.plot(t, resp, color=color, alpha=0.7, label=f'{log_name}')
+            
+            # Add metrics text
+            y_pos = 1.3 - (i * 0.1)  # Stack metrics text for different logs
+            ax.text(250, y_pos, 
+                   f'{log_name} - Rise: {metrics["rise_time"]:.1f}ms, '
+                   f'Settling: {metrics["settling_time"]:.1f}ms, '
+                   f'Overshoot: {metrics["overshoot"]:.1f}%',
+                   color=color, horizontalalignment='center', verticalalignment='center')
+    
+    # Clean up temporary CSV file
+    os.remove(csv_file)
 
-# Plot roll step response
-t, metrics, resp = calculate_step_response(df[' rcCommand[0]'].values, df[' gyroADC[0]'].values, log_rate, axis_name="Roll")
-if t is not None:
-    ax1.plot(t, resp, color='red', alpha=0.7)
-    setup_axis(ax1, 'Roll', metrics)
+# Add legends
+for ax in [ax1, ax2, ax3]:
+    ax.legend(loc='upper right')
 
-# Plot pitch step response
-t, metrics, resp = calculate_step_response(df[' rcCommand[1]'].values, df[' gyroADC[1]'].values, log_rate, axis_name="Pitch")
-if t is not None:
-    ax2.plot(t, resp, color='red', alpha=0.7)
-    setup_axis(ax2, 'Pitch', metrics)
-
-# Plot yaw step response
-t, metrics, resp = calculate_step_response(df[' rcCommand[2]'].values, df[' gyroADC[2]'].values, log_rate, axis_name="Yaw")
-if t is not None:
-    ax3.plot(t, resp, color='red', alpha=0.7)
-    setup_axis(ax3, 'Yaw', metrics)
-    ax3.set_xlabel('Time (ms)')
-
-plt.savefig('step_response.png', dpi=300, bbox_inches='tight') 
+plt.savefig('step_responses.png', dpi=300, bbox_inches='tight') 
