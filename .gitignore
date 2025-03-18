@@ -1,0 +1,8 @@
+blackbox_decode
+*.bbl
+*.csv
+*.png
+*.pdf
+*.log
+*.log.*
+logs/*
